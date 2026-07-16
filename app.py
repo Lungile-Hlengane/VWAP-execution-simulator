@@ -322,9 +322,11 @@ N_TERMINALS = int(
     / SLICE_MINUTES
 )
 
-IMPACT_COEFFICIENT = 100.0  # calibrated so impact ratings actually span Excellent-Bad
-                            # across realistic BTC/USDT participation rates (0.01-5%);
-                            # see README "Key formulas" for the reasoning behind this value
+IMPACT_COEFFICIENT = 300.0  # calibrated against an OBSERVED real participation rate
+                            # (~0.0225% for a $1M order in this app's actual data), not a
+                            # hypothetical one - a $1M order now lands around "Good" instead
+                            # of every order reading "Excellent" regardless of size. See
+                            # README "Key formulas" for the numbers behind this value.
 IMPACT_EXPONENT = 0.5
 MIN_LOOKBACK_DAYS = 3
 MAX_LOOKBACK_DAYS = 60
