@@ -97,12 +97,15 @@ at the top of `app.py` in the `PALETTE` dict and the `_glow_*` / `_hud_frame` /
 
 ```
 .
-├── app.py               # Streamlit app: UI, strategy, cost model, chart
-├── requirements.txt      # Python dependencies
-└── README.md             # This file
+├── .devcontainer/                         # Dev Container config (VS Code / Codespaces)
+├── app.py                                 # Streamlit app: UI, strategy, cost model, chart
+├── requirements.txt                       # Python dependencies
+├── shape_cache_backfill_and_app_(4).ipynb # Colab notebook used to prototype the strategy
+│                                           # and backfill the shape cache (see below)
+└── README.md                              # This file
 ```
 
-Everything lives in a single `app.py`, organized top to bottom as:
+The core logic lives in `app.py`, organized top to bottom as:
 
 | Section | What's in it |
 |---|---|
@@ -115,9 +118,28 @@ Everything lives in a single `app.py`, organized top to bottom as:
 | Cost metrics | `rate_impact_bps()`, `compute_cost_metrics()` |
 | Streamlit UI | inputs, run button, results rendering |
 
+**`shape_cache_backfill_and_app_(4).ipynb`** is the Colab notebook this app was
+developed from. It's not required to run the Streamlit app day-to-day (the
+`build_shape_history()` function in `app.py` will backfill any missing dates into
+the shape cache live, on demand) — but it's useful if you want to bulk-backfill a
+large date range of the shape cache in one batch run instead of one date at a
+time through the app, or if you're prototyping changes to the strategy /
+research plots before porting them into `app.py`.
+
+**`.devcontainer/`** provides a reproducible dev environment (VS Code Dev
+Containers or GitHub Codespaces) so you don't have to set up Python/deps by
+hand — see [Setup](#setup) below for the manual alternative.
+
 ## Setup
 
 **Requirements:** Python 3.9+
+
+**Option A — Dev Container (recommended if you use VS Code or Codespaces):**
+open the repo in VS Code and choose "Reopen in Container" (or launch a Codespace
+directly from GitHub) — `.devcontainer/` handles Python and dependencies for you,
+skip straight to setting the environment variables below.
+
+**Option B — manual:**
 
 ```bash
 git clone <this-repo>
@@ -150,23 +172,28 @@ strategy behavior:
 | `HISTORY_START` | `2026-04-01` | Earliest date of tick data available |
 | `SLICE_MINUTES` | `5` | Length of each execution "terminal" |
 | `N_TERMINALS` | `288` | Derived: number of 5-minute slices in a day |
-| `IMPACT_COEFFICIENT` | `100.0` | Scales the market impact cost model |
+| `IMPACT_COEFFICIENT` | `300.0` | Scales the market impact cost model |
 | `IMPACT_EXPONENT` | `0.5` | Controls how impact scales with participation rate (square-root impact model) |
 | `MIN_LOOKBACK_DAYS` | `3` | Minimum GA lookback window |
 | `MAX_LOOKBACK_DAYS` | `60` | Maximum GA lookback window |
 
-> **Calibration note:** `IMPACT_COEFFICIENT` was originally `10.0`, which made every
-> simulated order rate as "Excellent" (<2 bps) regardless of order size. That
-> happened because the strategy intentionally trades in the highest-volume
-> terminals (see `select_top_volume_windows()`), so participation rates on
-> BTC/USDT typically land around 0.01-0.3% even for multi-million-dollar orders -
-> and at that participation range, a coefficient of 10 produces well under 1 bp of
-> impact no matter what. `100.0` keeps the same square-root shape but spreads
-> results across the actual rating bands (roughly 1-3 bps at typical participation,
-> up to 10-30+ bps if you push order size or capture % high enough to force
-> trading into thinner slices). Neither value is empirically fit to real fills -
-> if you have historical execution data, refitting this constant against it would
-> be the correct next step rather than picking a rounder number.
+> **Calibration note:** this value has been through two rounds of adjustment.
+> `IMPACT_COEFFICIENT` was originally `10.0`, which made every simulated order
+> rate as "Excellent" (<2 bps) regardless of size - a $1M order in this app's
+> actual data produces roughly 0.0225% participation (because
+> `select_top_volume_windows()` intentionally trades in the highest-volume
+> terminals, and BTC/USDT is extremely liquid), and at that participation level
+> a coefficient of 10 caps out well under 1 bp no matter what. A first attempt
+> raised it to `100.0`, which turned out to still be too low - it only pushed
+> that same $1M order to 1.5 bps, still "Excellent". `300.0` is calibrated
+> against that same observed 0.0225% participation rate and actually produces a
+> spread across order sizes: roughly "Excellent/Good" around $100K-1M, "Poor"
+> in the $5-10M range, and "Bad" above ~$25M (assuming participation scales
+> roughly linearly with order size, which it does in practice since terminal
+> selection is otherwise the same). Neither this nor the previous values are
+> empirically fit to real fills - if you have historical execution data,
+> refitting this constant against it would be the correct next step rather than
+> anchoring to one observed data point the way this was.
 
 The **volume capture target** (30–90%) and **order size** are exposed as sliders/
 inputs in the UI itself rather than hardcoded.
