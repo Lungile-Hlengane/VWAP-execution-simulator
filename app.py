@@ -87,10 +87,13 @@ if not _aws_access_key or not _aws_secret_key:
 
 @st.cache_resource
 def get_fs():
-    # AWS credentials come from Streamlit Cloud secrets (see deployment notes),
-    # which get exported as environment variables, so s3fs picks them up
-    # automatically - no keys handled in this file.
-    return s3fs.S3FileSystem()
+    # Pass credentials explicitly rather than relying on s3fs/aiobotocore to
+    # pick them up from the environment - more reliable across platforms.
+    return s3fs.S3FileSystem(
+        key=_aws_access_key,
+        secret=_aws_secret_key,
+        client_kwargs={"region_name": _aws_region},
+    )
 
 
 # ---------------------------------------------------------------------------
