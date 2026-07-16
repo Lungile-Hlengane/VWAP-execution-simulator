@@ -30,48 +30,106 @@ import s3fs
 import streamlit as st
 from matplotlib.patches import Patch
 
-# --- Shared visual style, same as the research notebook -------------------
+# --- Shared visual style: dark HUD / cyberpunk theme ----------------------
 plt.rcParams.update({
-    "figure.facecolor": "#0E1117",
-    "axes.facecolor": "#0E1117",
-    "axes.edgecolor": "#4A4A4A",
-    "axes.labelcolor": "#E0E0E0",
+    "figure.facecolor": "#04060A",
+    "axes.facecolor": "#04060A",
+    "axes.edgecolor": "#1B2430",
+    "axes.labelcolor": "#B9C4D4",
     "axes.titleweight": "bold",
-    "axes.titlesize": 12,
-    "axes.labelsize": 10.5,
+    "axes.titlesize": 11.5,
+    "axes.labelsize": 10,
     "axes.grid": True,
-    "grid.color": "#2A2E36",
-    "grid.linewidth": 0.8,
-    "font.family": "DejaVu Sans",
-    "font.size": 10.5,
-    "text.color": "#E0E0E0",
-    "xtick.color": "#B0B0B0",
-    "ytick.color": "#B0B0B0",
-    "legend.frameon": False,
-    "legend.fontsize": 9.5,
-    "savefig.facecolor": "#0E1117",
+    "grid.color": "#101823",
+    "grid.linewidth": 0.7,
+    "grid.linestyle": (0, (1, 3)),
+    "font.family": "monospace",
+    "font.size": 10,
+    "text.color": "#C7D0DA",
+    "xtick.color": "#7C8898",
+    "ytick.color": "#7C8898",
+    "legend.frameon": True,
+    "legend.facecolor": "#080C12",
+    "legend.edgecolor": "#1F2C3A",
+    "legend.framealpha": 0.9,
+    "legend.fontsize": 8.5,
+    "savefig.facecolor": "#04060A",
 })
 
 PALETTE = {
-    "market": "#5DA9E9",
-    "ours": "#FFA857",
-    "fill": "#FF5C5C",
-    "high_part": "#FF5C5C",
-    "low_part": "#5DA9E9",
-    "grid_bg": "#161B22",
-    "text_muted": "#9AA0A6",
+    "market": "#00D9FF",       # neon cyan - market VWAP line
+    "ours": "#FFB627",         # amber - our VWAP / allocation
+    "fill": "#FF3E7D",         # neon pink - our fills
+    "arrival": "#39FF88",      # neon green - arrival price reference
+    "high_part": "#FF3E7D",    # elevated participation
+    "low_part": "#00D9FF",     # normal participation
+    "grid_bg": "#0A0F16",
+    "session_shade": "#0E2530",
+    "text_muted": "#7C8898",
 }
 
 
 def _clean_axis(ax):
     for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
-    ax.tick_params(length=3)
+    for spine in ["left", "bottom"]:
+        ax.spines[spine].set_color("#1B2430")
+    ax.tick_params(length=3, colors="#7C8898")
+
+
+def _glow_line(ax, x, y, color, lw=1.6, layers=4, zorder=3, **kwargs):
+    """Fake a neon glow by stacking translucent, progressively thicker lines
+    under a crisp core line."""
+    for i in range(layers, 0, -1):
+        ax.plot(x, y, color=color, linewidth=lw + i * 2.2, alpha=0.05,
+                 solid_capstyle="round", zorder=zorder - 1, solid_joinstyle="round")
+    return ax.plot(x, y, color=color, linewidth=lw, zorder=zorder, **kwargs)[0]
+
+
+def _glow_scatter(ax, x, y, color, s=28, layers=3, zorder=6, **kwargs):
+    for i in range(layers, 0, -1):
+        ax.scatter(x, y, color=color, s=s + i * 55, alpha=0.05, zorder=zorder - 1, linewidths=0)
+    return ax.scatter(x, y, color=color, s=s, zorder=zorder, **kwargs)
+
+
+def _glow_hline(ax, y, color, lw=1.3, layers=3, zorder=3, **kwargs):
+    for i in range(layers, 0, -1):
+        ax.axhline(y, color=color, linewidth=lw + i * 2.5, alpha=0.05, zorder=zorder - 1)
+    return ax.axhline(y, color=color, linewidth=lw, zorder=zorder, **kwargs)
+
+
+def _hud_frame(fig):
+    """Thin neon border + corner brackets around the whole figure, for that
+    heads-up-display look."""
+    frame_ax = fig.add_axes([0, 0, 1, 1])
+    frame_ax.axis("off")
+    frame_ax.set_xlim(0, 1)
+    frame_ax.set_ylim(0, 1)
+
+    edge = "#1C3B45"
+    frame_ax.add_patch(plt.Rectangle((0.006, 0.006), 0.988, 0.988, fill=False,
+                                      edgecolor=edge, linewidth=1.1, alpha=0.9, zorder=10))
+
+    bracket = 0.018
+    bracket_color = PALETTE["market"]
+    corners = [(0.006, 0.006, 1, 1), (0.994, 0.006, -1, 1),
+               (0.006, 0.994, 1, -1), (0.994, 0.994, -1, -1)]
+    for cx, cy, dx, dy in corners:
+        frame_ax.plot([cx, cx + dx * bracket], [cy, cy], color=bracket_color,
+                       linewidth=2.0, alpha=0.85, zorder=11, solid_capstyle="round")
+        frame_ax.plot([cx, cx], [cy, cy + dy * bracket], color=bracket_color,
+                       linewidth=2.0, alpha=0.85, zorder=11, solid_capstyle="round")
+    return frame_ax
+
+
+def _shade_sessions(ax, segments, color=PALETTE["session_shade"], alpha=0.35):
+    for start, end in segments:
+        ax.axvspan(start - 0.5, end + 0.5, color=color, alpha=alpha, zorder=0, linewidth=0)
 
 
 def plot_execution_summary(results_df, n_terminals):
-    """Same 3-panel dark-theme figure as the research notebook, returned
-    as a matplotlib Figure so Streamlit can render it with st.pyplot."""
+    """3-panel HUD-styled execution figure, returned as a matplotlib Figure
+    so Streamlit can render it with st.pyplot."""
     df = results_df.dropna(subset=["fill_price"]).copy().sort_values("terminal").reset_index(drop=True)
     if df.empty:
         return None
@@ -92,6 +150,17 @@ def plot_execution_summary(results_df, n_terminals):
         plot_rows.append(row)
     df_plot = pd.DataFrame(plot_rows).reset_index(drop=True)
 
+    # Contiguous traded segments, used to shade "active" trading windows.
+    segments = []
+    seg_start = df["terminal"].iloc[0]
+    prev = seg_start
+    for t in df["terminal"].iloc[1:]:
+        if t - prev > gap_threshold:
+            segments.append((seg_start, prev))
+            seg_start = t
+        prev = t
+    segments.append((seg_start, prev))
+
     arrival_price = df.iloc[0]["terminal_vwap"]
     our_vwap = (df["fill_price"] * df["your_qty"]).sum() / df["your_qty"].sum()
     total_impact_usd = (df["your_qty"] * df["terminal_vwap"] * df["impact_bps"] / 10000).sum()
@@ -99,84 +168,114 @@ def plot_execution_summary(results_df, n_terminals):
     impact_bps_total = (total_impact_usd / total_usd) * 10000
     rating = rate_impact_bps(impact_bps_total)
     rating_color = {
-        "Excellent": "#4CD964", "Good": "#9BE564", "Acceptable": "#FFD54F",
-        "Poor": "#FFA657", "Bad": "#FF5C5C",
-    }.get(rating, "#9AA0A6")
+        "Excellent": "#39FF88", "Good": "#9BE564", "Acceptable": "#FFD54F",
+        "Poor": "#FF9F45", "Bad": "#FF3E7D",
+    }.get(rating, "#7C8898")
 
     fig, axes = plt.subplots(3, 1, figsize=(15, 11.6), sharex=True,
                               gridspec_kw={"height_ratios": [2.1, 1.4, 1]})
-    fig.patch.set_facecolor("#0E1117")
+    fig.patch.set_facecolor("#04060A")
 
-    fig.suptitle(f"Execution Summary — {df['date'].iloc[0]}", fontsize=15, fontweight="bold",
-                 x=0.01, ha="left", y=0.995, color="#F0F0F0")
+    _hud_frame(fig)
 
-    # --- KPI boxes ---
+    fig.suptitle(f"► EXECUTION SUMMARY — {df['date'].iloc[0]}", fontsize=14.5, fontweight="bold",
+                 x=0.025, ha="left", y=0.99, color="#E8F6FF", family="monospace")
+
+    # --- KPI cards ---
     kpi_vals = [
         ("ORDER", f"${total_usd:,.0f}", PALETTE["text_muted"]),
         ("SLICES TRADED", f"{len(df)} / {n_terminals}", PALETTE["text_muted"]),
-        ("ARRIVAL PRICE", f"${arrival_price:,.2f}", PALETTE["text_muted"]),
+        ("ARRIVAL PRICE", f"${arrival_price:,.2f}", PALETTE["arrival"]),
         ("OUR VWAP", f"${our_vwap:,.2f}", PALETTE["ours"]),
-        ("IMPACT COST", f"{impact_bps_total:.2f} bps — {rating}", rating_color),
+        ("IMPACT COST", f"{impact_bps_total:.2f} bps — {rating.upper()}", rating_color),
     ]
-    kpi_ax = fig.add_axes([0.01, 0.945, 0.98, 0.035])
+    kpi_ax = fig.add_axes([0.02, 0.90, 0.965, 0.055])
     kpi_ax.axis("off")
+    kpi_ax.set_xlim(0, 1)
+    kpi_ax.set_ylim(0, 1)
     n = len(kpi_vals)
+    pad = 0.006
+    card_w = (1 - pad * (n + 1)) / n
     for i, (label, val, color) in enumerate(kpi_vals):
-        x = i / n
-        kpi_ax.text(x, 0.65, label, fontsize=8, color="#6E7580",
-                    transform=kpi_ax.transAxes, ha="left")
-        kpi_ax.text(x, 0.0, val, fontsize=13.5, fontweight="bold", color=color,
-                    transform=kpi_ax.transAxes, ha="left")
+        x0 = pad + i * (card_w + pad)
+        kpi_ax.add_patch(plt.Rectangle((x0, 0.05), card_w, 0.9, fill=True,
+                                        facecolor="#080C12", edgecolor="#1F2C3A",
+                                        linewidth=1.0, zorder=1))
+        kpi_ax.add_patch(plt.Rectangle((x0, 0.05), card_w, 0.06, fill=True,
+                                        facecolor=color, edgecolor="none", alpha=0.9, zorder=2))
+        kpi_ax.text(x0 + 0.02, 0.72, label, fontsize=8, color="#6E7C8C",
+                    ha="left", va="center", family="monospace", zorder=3)
+        kpi_ax.text(x0 + 0.02, 0.32, val, fontsize=13, fontweight="bold", color=color,
+                    ha="left", va="center", family="monospace", zorder=3)
 
     # --- Panel 1: price ---
     ax1 = axes[0]
-    ax1.plot(df_plot["terminal"], df_plot["terminal_vwap"], color=PALETTE["market"],
-              linewidth=1.6, label="Market VWAP (selected terminals)", zorder=2)
-    ax1.scatter(df["terminal"], df["fill_price"], color=PALETTE["fill"], s=28,
-                zorder=5, edgecolor="#0E1117", linewidth=0.5, label="Your fill price (incl. impact)")
-    ax1.axhline(arrival_price, color="#6E7580", linestyle=":", linewidth=1.2,
+    _shade_sessions(ax1, segments)
+    _glow_line(ax1, df_plot["terminal"], df_plot["terminal_vwap"], PALETTE["market"],
+               lw=1.6, label="Market VWAP (selected terminals)", zorder=3)
+    _glow_scatter(ax1, df["terminal"], df["fill_price"], PALETTE["fill"], s=26,
+                  edgecolor="#04060A", linewidth=0.6, label="Your fill price (incl. impact)", zorder=6)
+    _glow_hline(ax1, arrival_price, PALETTE["arrival"], lw=1.3, linestyle=":",
                 label=f"Arrival price (${arrival_price:,.2f})")
-    ax1.axhline(our_vwap, color=PALETTE["ours"], linestyle="--", linewidth=1.2,
+    _glow_hline(ax1, our_vwap, PALETTE["ours"], lw=1.3, linestyle="--",
                 label=f"Your VWAP (${our_vwap:,.2f})")
-    ax1.set_ylabel("BTC Price (USD)")
-    ax1.set_title("Price vs. Fills", loc="left", pad=8)
+    ax1.set_ylabel("BTC PRICE (USD)")
+    ax1.set_title("▍ PRICE VS. FILLS", loc="left", pad=8, color="#E8F6FF")
     ax1.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.0f}"))
     ax1.legend(loc="upper left", ncol=2)
     _clean_axis(ax1)
 
     # --- Panel 2: notional volume, log scale ---
     ax2 = axes[1]
-    ax2.bar(df["terminal"], df["market_notional_usd"], color=PALETTE["market"], alpha=0.35,
-            width=1.0, label="Market volume (USD)")
+    _shade_sessions(ax2, segments)
+    ax2.bar(df["terminal"], df["market_notional_usd"], color=PALETTE["market"], alpha=0.30,
+            width=1.0, label="Market volume (USD)", zorder=2)
     ax2.bar(df["terminal"], df["target_usd"], color=PALETTE["ours"], width=0.6,
-            label="Your allocation (USD)")
-    ax2.set_ylabel("USD Notional (log)")
+            label="Your allocation (USD)", zorder=3, edgecolor=PALETTE["ours"], linewidth=0.3)
+    ax2.set_ylabel("USD NOTIONAL (LOG)")
     ax2.set_yscale("log")
     ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
-    ax2.set_title("Order Size vs. Market Depth", loc="left", pad=8)
+    ax2.set_title("▍ ORDER SIZE VS. MARKET DEPTH", loc="left", pad=8, color="#E8F6FF")
     ax2.legend(loc="upper left")
     _clean_axis(ax2)
 
     # --- Panel 3: participation ---
     ax3 = axes[2]
+    _shade_sessions(ax3, segments)
     median_part = df["participation_pct"].median()
     colors = [PALETTE["high_part"] if p > median_part * 2 else PALETTE["low_part"]
               for p in df["participation_pct"]]
-    ax3.bar(df["terminal"], df["participation_pct"], color=colors, width=1.0, alpha=0.85)
-    ax3.axhline(df["participation_pct"].mean(), color="#B0B0B0", linestyle="--", linewidth=1)
-    ax3.set_ylabel("Participation %")
-    ax3.set_xlabel("Terminal (5-min slice, 0 = midnight)")
-    ax3.set_title("Participation Rate  (red = >2x median — impact-heavy slices)", loc="left", pad=8)
+    ax3.bar(df["terminal"], df["participation_pct"], color=colors, width=1.0, alpha=0.9, zorder=2)
+    ax3.axhline(df["participation_pct"].mean(), color="#9AA6B4", linestyle="--", linewidth=1, zorder=3)
+    ax3.set_ylabel("PARTICIPATION %")
+    ax3.set_title("▍ PARTICIPATION RATE  (pink = >2x median — impact-heavy slices)",
+                  loc="left", pad=8, color="#E8F6FF")
     ax3.legend(loc="upper right", handles=[
-        plt.Line2D([0], [0], color="#B0B0B0", linestyle="--", linewidth=1,
+        plt.Line2D([0], [0], color="#9AA6B4", linestyle="--", linewidth=1,
                    label=f"Avg: {df['participation_pct'].mean():.2f}%"),
         Patch(facecolor=PALETTE["low_part"], label="Normal"),
         Patch(facecolor=PALETTE["high_part"], label="Elevated (>2x median)"),
     ])
     _clean_axis(ax3)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    # --- Shared x-axis: show clock time instead of raw terminal index ---
+    slice_minutes = (24 * 60) / n_terminals
+
+    def _terminal_to_clock(t, _pos):
+        total_min = (t - 1) * slice_minutes
+        hh = int(total_min // 60) % 24
+        mm = int(total_min % 60)
+        return f"{hh:02d}:{mm:02d}"
+
+    ax3.set_xlabel("TIME OF DAY (UTC)")
+    ax3.xaxis.set_major_formatter(mticker.FuncFormatter(_terminal_to_clock))
+    tick_step = max(1, round(n_terminals / 12))
+    ax3.xaxis.set_major_locator(mticker.MultipleLocator(tick_step))
+    plt.setp(ax3.get_xticklabels(), rotation=0, ha="center")
+
+    plt.tight_layout(rect=[0.01, 0.01, 0.99, 0.885])
     return fig
+
 
 # ---------------------------------------------------------------------------
 # Config
