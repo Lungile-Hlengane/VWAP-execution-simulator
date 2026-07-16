@@ -30,7 +30,31 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-S3_BUCKET = os.environ.get("S3_BUCKET", "madot-algo-data")
+# Streamlit secrets (Settings -> Secrets) show up in st.secrets, NOT in
+# os.environ automatically. We pull them from st.secrets here and export them
+# as env vars ourselves, since boto3/s3fs both read credentials from the
+# environment. Falls back to actual environment variables (e.g. for local
+# dev via `export AWS_ACCESS_KEY_ID=...`) if st.secrets isn't configured.
+def _get_secret(key, default=None):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
+_aws_access_key = _get_secret("AWS_ACCESS_KEY_ID")
+_aws_secret_key = _get_secret("AWS_SECRET_ACCESS_KEY")
+_aws_region = _get_secret("AWS_DEFAULT_REGION", "eu-north-1")
+
+if _aws_access_key:
+    os.environ["AWS_ACCESS_KEY_ID"] = _aws_access_key
+if _aws_secret_key:
+    os.environ["AWS_SECRET_ACCESS_KEY"] = _aws_secret_key
+os.environ["AWS_DEFAULT_REGION"] = _aws_region
+
+S3_BUCKET = _get_secret("S3_BUCKET", "madot-algo-data")
 AGGTRADES_PREFIX = "parquets/aggTrades"
 SHAPE_CACHE_KEY = "parquets/shape_cache/hourly_shapes.json"
 
@@ -53,8 +77,12 @@ IMPACT_EXPONENT = 0.5
 MIN_LOOKBACK_DAYS = 3
 MAX_LOOKBACK_DAYS = 60
 
-AWS_DEFAULT_REGION = os.environ.get("AWS_DEFAULT_REGION", "eu-north-1")
-os.environ.setdefault("AWS_DEFAULT_REGION", AWS_DEFAULT_REGION)
+if not _aws_access_key or not _aws_secret_key:
+    st.error(
+        "AWS credentials not found. Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY "
+        "in this app's Settings -> Secrets, then reload."
+    )
+    st.stop()
 
 
 @st.cache_resource
