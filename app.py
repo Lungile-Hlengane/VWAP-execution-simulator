@@ -22,10 +22,161 @@ import os
 import random
 from datetime import datetime, timedelta
 
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import s3fs
 import streamlit as st
+from matplotlib.patches import Patch
+
+# --- Shared visual style, same as the research notebook -------------------
+plt.rcParams.update({
+    "figure.facecolor": "#0E1117",
+    "axes.facecolor": "#0E1117",
+    "axes.edgecolor": "#4A4A4A",
+    "axes.labelcolor": "#E0E0E0",
+    "axes.titleweight": "bold",
+    "axes.titlesize": 12,
+    "axes.labelsize": 10.5,
+    "axes.grid": True,
+    "grid.color": "#2A2E36",
+    "grid.linewidth": 0.8,
+    "font.family": "DejaVu Sans",
+    "font.size": 10.5,
+    "text.color": "#E0E0E0",
+    "xtick.color": "#B0B0B0",
+    "ytick.color": "#B0B0B0",
+    "legend.frameon": False,
+    "legend.fontsize": 9.5,
+    "savefig.facecolor": "#0E1117",
+})
+
+PALETTE = {
+    "market": "#5DA9E9",
+    "ours": "#FFA857",
+    "fill": "#FF5C5C",
+    "high_part": "#FF5C5C",
+    "low_part": "#5DA9E9",
+    "grid_bg": "#161B22",
+    "text_muted": "#9AA0A6",
+}
+
+
+def _clean_axis(ax):
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+    ax.tick_params(length=3)
+
+
+def plot_execution_summary(results_df, n_terminals):
+    """Same 3-panel dark-theme figure as the research notebook, returned
+    as a matplotlib Figure so Streamlit can render it with st.pyplot."""
+    df = results_df.dropna(subset=["fill_price"]).copy().sort_values("terminal").reset_index(drop=True)
+    if df.empty:
+        return None
+
+    df["market_notional_usd"] = df["market_qty"] * df["terminal_vwap"]
+
+    # Insert NaN break-points across gaps in the selected terminals so the
+    # price line doesn't join across skipped slices.
+    gap_threshold = 1
+    plot_rows = []
+    for i, row in df.iterrows():
+        if i > 0 and (row["terminal"] - df.loc[i - 1, "terminal"]) > gap_threshold:
+            blank = row.copy()
+            blank["terminal_vwap"] = np.nan
+            blank["fill_price"] = np.nan
+            blank["terminal"] = df.loc[i - 1, "terminal"] + 0.5
+            plot_rows.append(blank)
+        plot_rows.append(row)
+    df_plot = pd.DataFrame(plot_rows).reset_index(drop=True)
+
+    arrival_price = df.iloc[0]["terminal_vwap"]
+    our_vwap = (df["fill_price"] * df["your_qty"]).sum() / df["your_qty"].sum()
+    total_impact_usd = (df["your_qty"] * df["terminal_vwap"] * df["impact_bps"] / 10000).sum()
+    total_usd = df["target_usd"].sum()
+    impact_bps_total = (total_impact_usd / total_usd) * 10000
+    rating = rate_impact_bps(impact_bps_total)
+    rating_color = {
+        "Excellent": "#4CD964", "Good": "#9BE564", "Acceptable": "#FFD54F",
+        "Poor": "#FFA657", "Bad": "#FF5C5C",
+    }.get(rating, "#9AA0A6")
+
+    fig, axes = plt.subplots(3, 1, figsize=(15, 11.6), sharex=True,
+                              gridspec_kw={"height_ratios": [2.1, 1.4, 1]})
+    fig.patch.set_facecolor("#0E1117")
+
+    fig.suptitle(f"Execution Summary — {df['date'].iloc[0]}", fontsize=15, fontweight="bold",
+                 x=0.01, ha="left", y=0.995, color="#F0F0F0")
+
+    # --- KPI boxes ---
+    kpi_vals = [
+        ("ORDER", f"${total_usd:,.0f}", PALETTE["text_muted"]),
+        ("SLICES TRADED", f"{len(df)} / {n_terminals}", PALETTE["text_muted"]),
+        ("ARRIVAL PRICE", f"${arrival_price:,.2f}", PALETTE["text_muted"]),
+        ("OUR VWAP", f"${our_vwap:,.2f}", PALETTE["ours"]),
+        ("IMPACT COST", f"{impact_bps_total:.2f} bps — {rating}", rating_color),
+    ]
+    kpi_ax = fig.add_axes([0.01, 0.945, 0.98, 0.035])
+    kpi_ax.axis("off")
+    n = len(kpi_vals)
+    for i, (label, val, color) in enumerate(kpi_vals):
+        x = i / n
+        kpi_ax.text(x, 0.65, label, fontsize=8, color="#6E7580",
+                    transform=kpi_ax.transAxes, ha="left")
+        kpi_ax.text(x, 0.0, val, fontsize=13.5, fontweight="bold", color=color,
+                    transform=kpi_ax.transAxes, ha="left")
+
+    # --- Panel 1: price ---
+    ax1 = axes[0]
+    ax1.plot(df_plot["terminal"], df_plot["terminal_vwap"], color=PALETTE["market"],
+              linewidth=1.6, label="Market VWAP (selected terminals)", zorder=2)
+    ax1.scatter(df["terminal"], df["fill_price"], color=PALETTE["fill"], s=28,
+                zorder=5, edgecolor="#0E1117", linewidth=0.5, label="Your fill price (incl. impact)")
+    ax1.axhline(arrival_price, color="#6E7580", linestyle=":", linewidth=1.2,
+                label=f"Arrival price (${arrival_price:,.2f})")
+    ax1.axhline(our_vwap, color=PALETTE["ours"], linestyle="--", linewidth=1.2,
+                label=f"Your VWAP (${our_vwap:,.2f})")
+    ax1.set_ylabel("BTC Price (USD)")
+    ax1.set_title("Price vs. Fills", loc="left", pad=8)
+    ax1.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.0f}"))
+    ax1.legend(loc="upper left", ncol=2)
+    _clean_axis(ax1)
+
+    # --- Panel 2: notional volume, log scale ---
+    ax2 = axes[1]
+    ax2.bar(df["terminal"], df["market_notional_usd"], color=PALETTE["market"], alpha=0.35,
+            width=1.0, label="Market volume (USD)")
+    ax2.bar(df["terminal"], df["target_usd"], color=PALETTE["ours"], width=0.6,
+            label="Your allocation (USD)")
+    ax2.set_ylabel("USD Notional (log)")
+    ax2.set_yscale("log")
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
+    ax2.set_title("Order Size vs. Market Depth", loc="left", pad=8)
+    ax2.legend(loc="upper left")
+    _clean_axis(ax2)
+
+    # --- Panel 3: participation ---
+    ax3 = axes[2]
+    median_part = df["participation_pct"].median()
+    colors = [PALETTE["high_part"] if p > median_part * 2 else PALETTE["low_part"]
+              for p in df["participation_pct"]]
+    ax3.bar(df["terminal"], df["participation_pct"], color=colors, width=1.0, alpha=0.85)
+    ax3.axhline(df["participation_pct"].mean(), color="#B0B0B0", linestyle="--", linewidth=1)
+    ax3.set_ylabel("Participation %")
+    ax3.set_xlabel("Terminal (5-min slice, 0 = midnight)")
+    ax3.set_title("Participation Rate  (red = >2x median — impact-heavy slices)", loc="left", pad=8)
+    ax3.legend(loc="upper right", handles=[
+        plt.Line2D([0], [0], color="#B0B0B0", linestyle="--", linewidth=1,
+                   label=f"Avg: {df['participation_pct'].mean():.2f}%"),
+        Patch(facecolor=PALETTE["low_part"], label="Normal"),
+        Patch(facecolor=PALETTE["high_part"], label="Elevated (>2x median)"),
+    ])
+    _clean_axis(ax3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    return fig
 
 # ---------------------------------------------------------------------------
 # Config
@@ -486,14 +637,11 @@ if run:
     if best_period is not None:
         st.caption(f"GA-selected lookback window: {best_period} days | GA fit error (weighted MAPE): {ga_mape:.4f}")
 
-    st.markdown("#### Price vs. fills")
-    plot_df = results.dropna(subset=["fill_price"]).sort_values("terminal")
-    chart_df = plot_df.set_index("terminal")[["terminal_vwap", "fill_price"]]
-    chart_df.columns = ["Market VWAP (slice)", "Your fill price"]
-    st.line_chart(chart_df)
-
-    st.markdown("#### Participation rate by slice")
-    st.bar_chart(plot_df.set_index("terminal")[["participation_pct"]])
+    fig = plot_execution_summary(results, N_TERMINALS)
+    if fig is None:
+        st.warning("Nothing to plot - every selected terminal came back empty for this day.")
+    else:
+        st.pyplot(fig)
 
     with st.expander("Full fill-by-fill detail"):
         st.dataframe(results, use_container_width=True)
