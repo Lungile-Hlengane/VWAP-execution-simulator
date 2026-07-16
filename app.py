@@ -322,7 +322,9 @@ N_TERMINALS = int(
     / SLICE_MINUTES
 )
 
-IMPACT_COEFFICIENT = 10.0
+IMPACT_COEFFICIENT = 100.0  # calibrated so impact ratings actually span Excellent-Bad
+                            # across realistic BTC/USDT participation rates (0.01-5%);
+                            # see README "Key formulas" for the reasoning behind this value
 IMPACT_EXPONENT = 0.5
 MIN_LOOKBACK_DAYS = 3
 MAX_LOOKBACK_DAYS = 60
@@ -638,6 +640,13 @@ def compute_cost_metrics(results_df):
     total_slippage = total_qty * (our_vwap - arrival_price)
     total_bps = (total_slippage / total_usd) * 10000
 
+    # Separate benchmark: slippage vs. the full-day VWAP rather than arrival
+    # price, aggregated from the per-terminal slippage_vs_vwap_bps / cost_usd
+    # columns computed in run_vwap_strategy (previously only visible in the
+    # raw fill-by-fill table, not surfaced as a metric).
+    vwap_slippage_usd = df["cost_usd"].sum()
+    vwap_slippage_bps = (vwap_slippage_usd / total_usd) * 10000
+
     return {
         "arrival_price": arrival_price,
         "our_vwap": our_vwap,
@@ -648,6 +657,8 @@ def compute_cost_metrics(results_df):
         "timing_usd": timing_cost,
         "total_bps": total_bps,
         "total_slippage_usd": total_slippage,
+        "vwap_slippage_usd": vwap_slippage_usd,
+        "vwap_slippage_bps": vwap_slippage_bps,
         "positions_taken": len(df),
         "avg_participation_pct": df["participation_pct"].mean(),
         "max_participation_pct": df["participation_pct"].max(),
@@ -728,10 +739,16 @@ if run:
     m5.metric("Impact cost", f"{metrics['impact_bps']:.2f} bps", metrics["rating"])
 
     st.markdown("#### Cost breakdown (implementation shortfall vs. arrival price)")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("1. Market impact (your footprint)", f"${metrics['impact_usd']:,.2f}", f"{metrics['impact_bps']:.2f} bps")
     c2.metric("2. Timing / drift (market luck)", f"${metrics['timing_usd']:,.2f}", f"{metrics['timing_bps']:.2f} bps")
     c3.metric("3. Total vs. arrival", f"${metrics['total_slippage_usd']:,.2f}", f"{metrics['total_bps']:.2f} bps")
+    c4.metric("4. Slippage vs. day VWAP", f"${metrics['vwap_slippage_usd']:,.2f}", f"{metrics['vwap_slippage_bps']:.2f} bps")
+    st.caption(
+        "Metrics 1-3 benchmark against the arrival price (price when the order started). "
+        "Metric 4 benchmarks each fill against that day's overall market VWAP instead - "
+        "a different, commonly-used reference point."
+    )
 
     if best_period is not None:
         st.caption(f"GA-selected lookback window: {best_period} days | GA fit error (weighted MAPE): {ga_mape:.4f}")
